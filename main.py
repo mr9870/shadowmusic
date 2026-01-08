@@ -26,26 +26,35 @@ def search():
 @app.route('/proxy_audio')
 def proxy_audio():
     vid = request.args.get('id')
-    # Windows fix: Format 140 (m4a) is globally supported
     ydl_opts = {'format': '140/bestaudio', 'quiet': True, 'nocheckcertificate': True}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
             url = info['url']
             
-            # Fetching from YouTube with high-performance stream
-            resp = requests.get(url, stream=True, headers={'User-Agent': 'Mozilla/5.0'})
+            # Windows/Render Fix: Range Request Handling
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            if 'Range' in request.headers:
+                headers['Range'] = request.headers.get('Range')
             
-            # Render/Online Fix: Forward original headers for better buffering
-            headers = {
-                'Content-Type': 'audio/mp4',
-                'Accept-Ranges': 'bytes',
-                'Access-Control-Allow-Origin': '*',
-                'Content-Length': resp.headers.get('Content-Length')
-            }
+            resp = requests.get(url, stream=True, headers=headers)
             
-            return Response(stream_with_context(resp.iter_content(chunk_size=1024*64)), headers=headers)
+            rv = Response(stream_with_context(resp.iter_content(chunk_size=1024*64)),
+                          status=resp.status_code,
+                          content_type=resp.headers.get('Content-Type'),
+                          direct_passthrough=True)
+            
+            # Essential Headers for Windows Native Player
+            rv.headers.add('Accept-Ranges', 'bytes')
+            if 'Content-Range' in resp.headers:
+                rv.headers.add('Content-Range', resp.headers.get('Content-Range'))
+            if 'Content-Length' in resp.headers:
+                rv.headers.add('Content-Length', resp.headers.get('Content-Length'))
+            rv.headers.add('Access-Control-Allow-Origin', '*')
+            
+            return rv
     except Exception as e:
+        print(f"Error: {e}")
         return str(e), 500
 
 if __name__ == "__main__":
