@@ -1,37 +1,41 @@
-from flask import Flask, request, Response, jsonify, stream_with_context
-from flask_cors import CORS
+from flask import Flask, request, jsonify, Response, stream_with_context
 import yt_dlp
 import requests
-import urllib3
-import os
-
-# SSL warnings disable karne ke liye
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+CORS(app) # Taaki Flutter app aur browser se connectivity bani rahe
 
 @app.route('/')
 def home():
-    return jsonify({"status": "Shadow Music Server is Online", "version": "1.1"})
+    return jsonify({"status": "Shadow Music Server is Online", "version": "1.2"})
 
-@app.route('/search', methods=['GET'])
-def search_songs():
+@app.route('/search')
+def search():
     query = request.args.get('q')
     if not query:
         return jsonify({"error": "No query provided"}), 400
         
-    # extract_flat: True taaki sirf metadata aaye, heavy data nahi
-    ydl_opts = {'quiet': True, 'extract_flat': True}
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+    }
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Hum query ke saath 'audio' add kar rahe hain taaki music quality mile
-            info = ydl.extract_info(f"ytsearch10:{query} audio", download=False)
-            results = [{
-                'id': e['id'], 
-                'title': e['title'], 
-                'thumbnail': f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"
-            } for e in info['entries']]
+            # YouTube search logic
+            search_results = ydl.extract_info(f"ytsearch10:{query}", download=False)['entries']
+            
+            results = []
+            for entry in search_results:
+                results.append({
+                    "id": entry.get("id"),
+                    "title": entry.get("title"),
+                    "thumbnail": f"https://i.ytimg.com/vi/{entry.get('id')}/mqdefault.jpg",
+                    "duration": entry.get("duration")
+                })
             return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -39,31 +43,44 @@ def search_songs():
 @app.route('/proxy_audio')
 def proxy_audio():
     vid = request.args.get('id')
-    # Format 140 = M4A (Light and High Quality for streaming)
+    if not vid:
+        return "No ID provided", 400
+
+    # Windows Stability Fix: specifically asking for m4a (format 140)
     ydl_opts = {
-        'format': '140/bestaudio/best',
+        'format': '140/bestaudio', 
         'quiet': True,
-        'no_warnings': True,
+        'nocheckcertificate': True,
     }
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
             url = info['url']
             
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            # Stream=True taaki data load hota rahe aur gaana chalta rahe
-            req = requests.get(url, stream=True, headers=headers, timeout=20, verify=False)
+            # Fetch stream from YouTube
+            resp = requests.get(url, stream=True, verify=False)
             
-            def generate():
-                for chunk in req.iter_content(chunk_size=32768): # 32KB chunks stability ke liye
-                    if chunk:
-                        yield chunk
+            # --- CRITICAL HEADERS FOR WINDOWS FIX ---
+            excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+            headers = [(name, value) for (name, value) in resp.raw.headers.items()
+                       if name.lower() not in excluded_headers]
             
-            return Response(stream_with_context(generate()), content_type='audio/mp4')
+            # Ye 3 headers Windows native player ke liye zaroori hain
+            headers.append(('Content-Type', 'audio/mp4')) # Windows recognizes m4a as audio/mp4
+            headers.append(('Accept-Ranges', 'bytes'))
+            headers.append(('Access-Control-Allow-Origin', '*'))
+            
+            return Response(
+                stream_with_context(resp.iter_content(chunk_size=1024*64)), 
+                headers=headers
+            )
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"Proxy Error: {e}")
+        return str(e), 500
 
 if __name__ == "__main__":
-    # Koyeb environment variable se PORT uthayega (Step 1 fix)
+    import os
+    # Render dynamic port support
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, threaded=True)
