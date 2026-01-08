@@ -1,69 +1,53 @@
-from flask import Flask, request, Response, jsonify, stream_with_context
-from flask_cors import CORS
+from flask import Flask, request, jsonify, Response, stream_with_context
 import yt_dlp
 import requests
-import urllib3
+from flask_cors import CORS
 import os
-
-# SSL warnings disable karne ke liye
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 CORS(app)
 
 @app.route('/')
 def home():
-    return jsonify({"status": "Shadow Music Server is Online", "version": "1.1"})
+    return jsonify({"status": "Online", "msg": "Shadow Music Production Server"})
 
-@app.route('/search', methods=['GET'])
-def search_songs():
+@app.route('/search')
+def search():
     query = request.args.get('q')
-    if not query:
-        return jsonify({"error": "No query provided"}), 400
-        
-    # extract_flat: True taaki sirf metadata aaye, heavy data nahi
-    ydl_opts = {'quiet': True, 'extract_flat': True}
+    ydl_opts = {'format': 'bestaudio/best', 'quiet': True, 'extract_flat': True}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Hum query ke saath 'audio' add kar rahe hain taaki music quality mile
-            info = ydl.extract_info(f"ytsearch10:{query} audio", download=False)
-            results = [{
-                'id': e['id'], 
-                'title': e['title'], 
-                'thumbnail': f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"
-            } for e in info['entries']]
+            search_results = ydl.extract_info(f"ytsearch10:{query}", download=False).get('entries', [])
+            results = [{"id": e['id'], "title": e['title'], "thumbnail": f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"} for e in search_results if e]
             return jsonify(results)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify([])
 
 @app.route('/proxy_audio')
 def proxy_audio():
     vid = request.args.get('id')
-    # Format 140 = M4A (Light and High Quality for streaming)
-    ydl_opts = {
-        'format': '140/bestaudio/best',
-        'quiet': True,
-        'no_warnings': True,
-    }
+    # Windows fix: Format 140 (m4a) is globally supported
+    ydl_opts = {'format': '140/bestaudio', 'quiet': True, 'nocheckcertificate': True}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
             url = info['url']
             
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            # Stream=True taaki data load hota rahe aur gaana chalta rahe
-            req = requests.get(url, stream=True, headers=headers, timeout=20, verify=False)
+            # Fetching from YouTube with high-performance stream
+            resp = requests.get(url, stream=True, headers={'User-Agent': 'Mozilla/5.0'})
             
-            def generate():
-                for chunk in req.iter_content(chunk_size=32768): # 32KB chunks stability ke liye
-                    if chunk:
-                        yield chunk
+            # Render/Online Fix: Forward original headers for better buffering
+            headers = {
+                'Content-Type': 'audio/mp4',
+                'Accept-Ranges': 'bytes',
+                'Access-Control-Allow-Origin': '*',
+                'Content-Length': resp.headers.get('Content-Length')
+            }
             
-            return Response(stream_with_context(generate()), content_type='audio/mp4')
+            return Response(stream_with_context(resp.iter_content(chunk_size=1024*64)), headers=headers)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return str(e), 500
 
 if __name__ == "__main__":
-    # Koyeb environment variable se PORT uthayega (Step 1 fix)
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, threaded=True)
+    app.run(host='0.0.0.0', port=port)
