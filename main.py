@@ -1,85 +1,74 @@
-from flask import Flask, request, jsonify, Response, stream_with_context
-import yt_dlp
-import requests
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
-import os
+import requests
+import re
 
 app = Flask(__name__)
 CORS(app)
 
-# Bypass Headers: YouTube ko lagega ki request ek real browser se aa rahi hai
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Accept': '*/*',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Origin': 'https://www.youtube.com',
-    'Referer': 'https://www.google.com/',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
 }
 
-@app.route('/')
-def home():
-    return jsonify({"status": "Shadow Music Server is Live", "bypass_mode": "Active"})
+def get_client_id():
+    try:
+        res = requests.get("https://soundcloud.com", headers=HEADERS)
+        scripts = re.findall(r'src="([^"]+\.js)"', res.text)
+        for script_url in reversed(scripts):
+            s_res = requests.get(script_url, headers=HEADERS)
+            found = re.findall(r'client_id:"([a-zA-Z0-9]{32})"', s_res.text)
+            if found: return found[0]
+    except: pass
+    return "iFagfuAuwkp6GbI6M6rA7UMw4LOdqC95" # Jo teri current working ID hai
+
+CLIENT_ID = get_client_id()
 
 @app.route('/search')
 def search():
     query = request.args.get('q')
     if not query: return jsonify([])
-    
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': True,
-        'nocheckcertificate': True,
-        'http_headers': HEADERS
-    }
-    
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # ytsearch10:query top 10 results nikalega
-            search_results = ydl.extract_info(f"ytsearch10:{query}", download=False).get('entries', [])
-            results = [{"id": e['id'], "title": e['title'], "thumbnail": f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"} for e in search_results if e]
-            return jsonify(results)
+        url = f"https://api-v2.soundcloud.com/search/tracks?q={query}&client_id={CLIENT_ID}&limit=15"
+        data = requests.get(url, headers=HEADERS).json()
+        results = []
+        for track in data.get('collection', []):
+            results.append({
+                'id': track['permalink_url'],
+                'title': track['title'],
+                'thumbnail': (track['artwork_url'] or track['user']['avatar_url']).replace('-large', '-t500x500'),
+                'artist': track['user']['username']
+            })
+        return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)})
 
 @app.route('/proxy_audio')
 def proxy_audio():
-    vid = request.args.get('id')
-    if not vid: return "Video ID missing", 400
-
-    # m4a format (140) use kar rahe hain kyunki ye Windows/Android dono par stable hai
-    ydl_opts = {
-        'format': '140/bestaudio',
-        'quiet': True,
-        'nocheckcertificate': True,
-        'http_headers': HEADERS
-    }
-    
+    track_url = request.args.get('id')
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
-            url = info['url']
-            
-            # YouTube se stream fetch karna browser headers ke sath
-            resp = requests.get(url, stream=True, headers=HEADERS, timeout=15)
-            
-            # Windows native player ke liye Partial Content (206) aur Range support headers
-            rv = Response(stream_with_context(resp.iter_content(chunk_size=1024*128)),
-                          status=resp.status_code,
-                          content_type='audio/mp4',
-                          direct_passthrough=True)
-            
-            rv.headers.add('Accept-Ranges', 'bytes')
-            if 'Content-Length' in resp.headers:
-                rv.headers.add('Content-Length', resp.headers.get('Content-Length'))
-            rv.headers.add('Access-Control-Allow-Origin', '*')
-            
-            return rv
+        # 1. Resolve SoundCloud URL to get track info
+        resolve_url = f"https://api-v2.soundcloud.com/resolve?url={track_url}&client_id={CLIENT_ID}"
+        track_data = requests.get(resolve_url, headers=HEADERS).json()
+        
+        # 2. Get the streaming URL (progressive format)
+        transcodings = track_data['media']['transcodings']
+        # Filter for progressive mp3 (sabse stable streaming ke liye)
+        stream_meta_url = next(t['url'] for t in transcodings if t['format']['protocol'] == 'progressive')
+        
+        final_stream_url = requests.get(f"{stream_meta_url}?client_id={CLIENT_ID}", headers=HEADERS).json()['url']
+        
+        # 3. Stream audio to Flutter
+        def generate():
+            with requests.get(final_stream_url, stream=True) as r:
+                for chunk in r.iter_content(chunk_size=1024*64):
+                    yield chunk
+        return Response(generate(), mimetype="audio/mpeg")
     except Exception as e:
-        # Agar bot detection ab bhi block kare toh error code 403 (Forbidden) bhejega
-        return str(e), 403
+        return str(e), 500
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, threaded=True)
+@app.route('/')
+def home():
+    return f"Shadow Backend Active. ClientID: {CLIENT_ID}"
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
