@@ -19,9 +19,13 @@ def get_client_id():
             found = re.findall(r'client_id:"([a-zA-Z0-9]{32})"', s_res.text)
             if found: return found[0]
     except: pass
-    return "iFagfuAuwkp6GbI6M6rA7UMw4LOdqC95" # Jo teri current working ID hai
+    return "iFagfuAuwkp6GbI6M6rA7UMw4LOdqC95"
 
 CLIENT_ID = get_client_id()
+
+@app.route('/')
+def home():
+    return f"Shadow Backend Active. ClientID: {CLIENT_ID}"
 
 @app.route('/search')
 def search():
@@ -46,29 +50,34 @@ def search():
 def proxy_audio():
     track_url = request.args.get('id')
     try:
-        # 1. Resolve SoundCloud URL to get track info
+        # 1. Resolve SoundCloud URL
         resolve_url = f"https://api-v2.soundcloud.com/resolve?url={track_url}&client_id={CLIENT_ID}"
         track_data = requests.get(resolve_url, headers=HEADERS).json()
         
-        # 2. Get the streaming URL (progressive format)
+        # 2. Media selection logic
         transcodings = track_data['media']['transcodings']
-        # Filter for progressive mp3 (sabse stable streaming ke liye)
-        stream_meta_url = next(t['url'] for t in transcodings if t['format']['protocol'] == 'progressive')
         
-        final_stream_url = requests.get(f"{stream_meta_url}?client_id={CLIENT_ID}", headers=HEADERS).json()['url']
+        # 'progressive' dhoondo, agar na mile toh 'hls' ya pehla format uthao (FIX)
+        try:
+            stream_meta_url = next(t['url'] for t in transcodings if t['format']['protocol'] == 'progressive')
+        except StopIteration:
+            # Agar progressive nahi hai, toh koi bhi available format (HLS etc) utha lo
+            stream_meta_url = transcodings[0]['url']
         
-        # 3. Stream audio to Flutter
+        # 3. Final streaming URL fetch karo
+        stream_res = requests.get(f"{stream_meta_url}?client_id={CLIENT_ID}", headers=HEADERS).json()
+        final_stream_url = stream_res['url']
+        
+        # 4. Stream generator
         def generate():
             with requests.get(final_stream_url, stream=True) as r:
                 for chunk in r.iter_content(chunk_size=1024*64):
                     yield chunk
         return Response(generate(), mimetype="audio/mpeg")
+        
     except Exception as e:
+        print(f"Backend Playback Error: {e}")
         return str(e), 500
-
-@app.route('/')
-def home():
-    return f"Shadow Backend Active. ClientID: {CLIENT_ID}"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
